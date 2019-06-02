@@ -18,6 +18,10 @@
 #include <fstream>
 #include <algorithm>
 
+#ifdef MKL
+#include "mkl.h"
+#endif
+
 using namespace std;
 
 CSolver::CSolver(CSkylineMatrix<double>* K) : K(K) {};
@@ -102,3 +106,112 @@ void CLDLTSolver::BackSubstitution(double* Force)
 			Force[i-1] -= (*K)(i,j) * Force[j-1];	// a_i = Vbar_i - sum_j(L_ij Vbar_j)
 	}
 };
+
+#ifdef MKL
+void CSRSolver::solve(double* Force, unsigned NLCase)
+{
+	void* pt[64];
+	for (unsigned _ = 0; _ < 64; _++) pt[_] = 0;
+
+	const int mtype = 2;
+	int iparm[64] = { 0 };
+
+	pardisoinit(pt, &mtype, iparm);
+	iparm[1] = 2; // The parallel (OpenMP) version of the nested dissection algorithm.
+	iparm[5] = 1; // write back to Force
+	iparm[59] = 1; // use OOC if needed
+
+	const int one = 1;
+	const int size = K.size;
+	double* values = K.values;
+	int* columns = K.columns;
+	int* rowIndexs = K.rowIndexs;
+
+	const int rhsCount = NLCase;
+	double* rhs = Force;
+
+	int phase = 13;
+	double* res = new double[rhsCount*size];
+	for (std::size_t _ = 0; _ < rhsCount*size; _++) res[_] = 0;
+
+	int msglvl = 0; // print info
+#if defined(_DEBUG_) || defined(_RUN_)
+	msglvl = 1;
+#endif // _DEBUG_
+	int* perm = new int[size];
+	int error;
+
+	pardiso(
+		pt, // handle to some shit
+		&one, // maxfct
+		&one, // mnum
+		&mtype, // sym pos matrix
+		&phase, // go through all
+		&size,  // size of matrix
+		values,
+		rowIndexs,
+		columns,
+		perm, // idk wtf this is
+		&rhsCount,
+		iparm, // sort like settings
+		&msglvl, // print info or not
+		rhs,
+		res,
+		&error // see if any error
+	);
+	if (error)
+	{
+		std::cerr << "ERROR IN PARDISO SOLVER: " << error << std::endl;
+		exit(8);
+	}
+
+#ifdef _DEBUG_
+	for (int _ = 0; _ < size; _++)
+		std::cout << "res[" << _ << "] = " << res[_] << std::endl;
+	for (int _ = 0; _ < size; _++)
+		std::cout << "rhs[" << _ << "] = " << rhs[_] << std::endl;
+#endif // _DEBUG_
+	delete[] perm;
+	delete[] res;
+}
+#endif
+
+#ifdef _VIB_
+//! only to be used before LDLT() factorization
+void CLDLTSolver::Multiple(double* acc, double* force, unsigned int numeq, unsigned int vib_m) {
+	unsigned int* diag = K.GetDiagonalAddress();
+	unsigned int* colh = K.GetColumnHeights();
+	unsigned int diag_sc = 0;
+	unsigned int row_ck = 0;
+
+	for (unsigned int i = 0; i < numeq*vib_m; ++i) {
+		force[i] = 0.0;
+	}
+
+	for (unsigned int i = 1; i < diag[numeq]; ++i) {
+
+		if (i == diag[diag_sc]) {
+			for (unsigned int j = 0; j < vib_m; ++j) {
+				force[j*numeq + diag_sc] += K(diag_sc + 1, diag_sc + 1)*acc[j*numeq + diag_sc];
+			}
+
+
+		}
+		else {
+			for (unsigned int j = 0; j < vib_m; ++j) {
+				force[j*numeq + row_ck] += K(diag_sc + 1, row_ck + 1)*acc[j*numeq + diag_sc];
+				force[j*numeq + diag_sc] += K(diag_sc + 1, row_ck + 1)*acc[j*numeq + row_ck];
+			}
+
+		}
+		if (diag_sc - row_ck < colh[diag_sc]) row_ck--;
+		else {
+			diag_sc++;
+			row_ck = diag_sc;
+		}
+
+	}
+
+}
+
+#endif
